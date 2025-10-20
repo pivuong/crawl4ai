@@ -2261,10 +2261,13 @@ def normalize_url_for_deep_crawl(href, base_url):
         query = urlencode(params, doseq=True) if params else ''
     
     # Build normalized URL
+    # - Collapse repeated slashes in path and ensure single leading slash
+    import re
+    path = '/' + re.sub(r'/+', '/', parsed.path.lstrip('/'))
     normalized = urlunparse((
         parsed.scheme,
         netloc,
-        parsed.path.rstrip('/'),  # Normalize trailing slash
+        path.rstrip('/'),  # Normalize trailing slash (keep root as empty)
         parsed.params,
         query,
         fragment
@@ -2289,10 +2292,13 @@ def efficient_normalize_url_for_deep_crawl(href, base_url):
     # Only perform the most critical normalizations
     # 1. Lowercase hostname
     # 2. Remove fragment
+    # 3. Collapse repeated slashes in path and ensure single leading slash
+    import re
+    path = '/' + re.sub(r'/+', '/', parsed.path.lstrip('/'))
     normalized = urlunparse((
         parsed.scheme,
         parsed.netloc.lower(),
-        parsed.path.rstrip('/'),
+        path.rstrip('/'),
         parsed.params,
         parsed.query,
         ''  # Remove fragment

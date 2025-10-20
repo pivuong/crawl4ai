@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import AsyncGenerator, Optional, Set, Dict, List, Tuple
 from collections import defaultdict, deque
 from urllib.parse import urlparse
+import os
 
 from ..models import TraversalStats
 from .filters import FilterChain
@@ -31,6 +32,7 @@ class BFSDeepCrawlStrategy(DeepCrawlStrategy):
         include_external: bool = False,
         score_threshold: float = -infinity,
         max_pages: int = infinity,
+        recrawl_limit_per_url: int = 5,
         logger: Optional[logging.Logger] = None,
     ):
         self.max_depth = max_depth
@@ -39,6 +41,7 @@ class BFSDeepCrawlStrategy(DeepCrawlStrategy):
         self.include_external = include_external
         self.score_threshold = score_threshold
         self.max_pages = max_pages
+        self.recrawl_limit_per_url = recrawl_limit_per_url
         self.logger = logger or logging.getLogger(__name__)
         self.stats = TraversalStats(start_time=datetime.now())
         self._cancel_event = asyncio.Event()
@@ -46,6 +49,8 @@ class BFSDeepCrawlStrategy(DeepCrawlStrategy):
         # Track URLs whose outgoing links have already been expanded to avoid
         # repeating link discovery when the same URL appears under a new parent
         self._expanded_urls: Set[str] = set()
+        # Track how many times a particular URL has been scheduled/crawled
+        self._url_crawl_counts: Dict[str, int] = {}
 
     async def can_process_url(self, url: str, depth: int) -> bool:
         """
@@ -107,6 +112,9 @@ class BFSDeepCrawlStrategy(DeepCrawlStrategy):
             # Strip URL fragments to avoid duplicate crawling
             # base_url = url.split('#')[0] if url else url
             base_url = normalize_url_for_deep_crawl(url, source_url)
+            # Enforce per-URL recrawl limit (counts across different parents)
+            if self._url_crawl_counts.get(base_url, 0) >= self.recrawl_limit_per_url:
+                continue
             if (base_url, source_url) in visited:
                 continue
             if not await self.can_process_url(url, next_depth):
@@ -142,6 +150,8 @@ class BFSDeepCrawlStrategy(DeepCrawlStrategy):
                 result.metadata["score"] = score
             next_level.append((url, source_url))
             depths[(url, source_url)] = next_depth
+            # Increment the crawl count since we are scheduling this URL
+            self._url_crawl_counts[url] = self._url_crawl_counts.get(url, 0) + 1
 
     async def _arun_batch(
         self,
