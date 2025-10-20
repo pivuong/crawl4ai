@@ -54,9 +54,11 @@ class DFSDeepCrawlStrategy(BFSDeepCrawlStrategy):
                         self.logger.info(f"Max pages limit ({self.max_pages}) reached during batch, stopping crawl")
                         break  # Exit the generator
                     
-                    # Only discover links from successful crawls
+                    # Only discover links from successful crawls and only once per URL
                     new_links: List[Tuple[str, Optional[str]]] = []
-                    await self.link_discovery(result, url, depth, visited, new_links, depths)
+                    if url not in self._expanded_urls:
+                        await self.link_discovery(result, url, depth, visited, new_links, depths)
+                        self._expanded_urls.add(url)
                     
                     # Push new links in reverse order so the first discovered is processed next.
                     for new_url, new_parent in reversed(new_links):
@@ -104,7 +106,9 @@ class DFSDeepCrawlStrategy(BFSDeepCrawlStrategy):
                         break  # Exit the generator
                     
                     new_links: List[Tuple[str, Optional[str]]] = []
-                    await self.link_discovery(result, url, depth, visited, new_links, depths)
+                    if url not in self._expanded_urls:
+                        await self.link_discovery(result, url, depth, visited, new_links, depths)
+                        self._expanded_urls.add(url)
                     for new_url, new_parent in reversed(new_links):
                         new_depth = depths.get((new_url, new_parent), depth + 1)
                         stack.append((new_url, new_parent, new_depth))

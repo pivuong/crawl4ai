@@ -43,6 +43,9 @@ class BFSDeepCrawlStrategy(DeepCrawlStrategy):
         self.stats = TraversalStats(start_time=datetime.now())
         self._cancel_event = asyncio.Event()
         self._pages_crawled = 0
+        # Track URLs whose outgoing links have already been expanded to avoid
+        # repeating link discovery when the same URL appears under a new parent
+        self._expanded_urls: Set[str] = set()
 
     async def can_process_url(self, url: str, depth: int) -> bool:
         """
@@ -188,10 +191,11 @@ class BFSDeepCrawlStrategy(DeepCrawlStrategy):
                 processed_results.append(result)
                 results.append(result)
 
-                # Only discover links from successful crawls
-                if result.success:
+                # Only discover links from successful crawls and only once per URL
+                if result.success and (url not in self._expanded_urls):
                     # Link discovery will handle the max pages limit internally
                     await self.link_discovery(result, url, depth, visited, next_level, depths)
+                    self._expanded_urls.add(url)
 
             # Update pages crawled counter - count only successful crawls we processed
             successful_results = [r for r in processed_results if r.success]
@@ -251,10 +255,11 @@ class BFSDeepCrawlStrategy(DeepCrawlStrategy):
                 results_count += 1
                 yield result
                 
-                # Only discover links from successful crawls
-                if result.success:
+                # Only discover links from successful crawls and only once per URL
+                if result.success and (url not in self._expanded_urls):
                     # Link discovery will handle the max pages limit internally
                     await self.link_discovery(result, url, depth, visited, next_level, depths)
+                    self._expanded_urls.add(url)
             
             # If we didn't get results back (e.g. due to errors), avoid getting stuck in an infinite loop
             # by considering these URLs as visited but not counting them toward the max_pages limit
