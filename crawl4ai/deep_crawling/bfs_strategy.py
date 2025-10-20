@@ -3,6 +3,7 @@ import asyncio
 import logging
 from datetime import datetime
 from typing import AsyncGenerator, Optional, Set, Dict, List, Tuple
+from collections import defaultdict, deque
 from urllib.parse import urlparse
 
 from ..models import TraversalStats
@@ -70,9 +71,9 @@ class BFSDeepCrawlStrategy(DeepCrawlStrategy):
         result: CrawlResult,
         source_url: str,
         current_depth: int,
-        visited: Set[str],
+        visited: Set[Tuple[str, Optional[str]]],
         next_level: List[Tuple[str, Optional[str]]],
-        depths: Dict[str, int],
+        depths: Dict[Tuple[str, Optional[str]], int],
     ) -> None:
         """
         Extracts links from the crawl result, validates and scores them, and
@@ -103,7 +104,7 @@ class BFSDeepCrawlStrategy(DeepCrawlStrategy):
             # Strip URL fragments to avoid duplicate crawling
             # base_url = url.split('#')[0] if url else url
             base_url = normalize_url_for_deep_crawl(url, source_url)
-            if base_url in visited:
+            if (base_url, source_url) in visited:
                 continue
             if not await self.can_process_url(url, next_depth):
                 self.stats.urls_skipped += 1
@@ -118,7 +119,7 @@ class BFSDeepCrawlStrategy(DeepCrawlStrategy):
                 self.stats.urls_skipped += 1
                 continue
 
-            visited.add(base_url)
+            visited.add((base_url, source_url))
             valid_links.append((base_url, score))
         
         # If we have more valid links than capacity, sort by score and take the top ones
@@ -137,7 +138,7 @@ class BFSDeepCrawlStrategy(DeepCrawlStrategy):
                 result.metadata = result.metadata or {}
                 result.metadata["score"] = score
             next_level.append((url, source_url))
-            depths[url] = next_depth
+            depths[(url, source_url)] = next_depth
 
     async def _arun_batch(
         self,
@@ -149,10 +150,10 @@ class BFSDeepCrawlStrategy(DeepCrawlStrategy):
         Batch (non-streaming) mode:
         Processes one BFS level at a time, then yields all the results.
         """
-        visited: Set[str] = set()
+        visited: Set[Tuple[str, Optional[str]]] = set()
         # current_level holds tuples: (url, parent_url)
         current_level: List[Tuple[str, Optional[str]]] = [(start_url, None)]
-        depths: Dict[str, int] = {start_url: 0}
+        depths: Dict[Tuple[str, Optional[str]], int] = {(start_url, None): 0}
 
         results: List[CrawlResult] = []
 
@@ -169,23 +170,32 @@ class BFSDeepCrawlStrategy(DeepCrawlStrategy):
             batch_config = config.clone(deep_crawl_strategy=None, stream=False)
             batch_results = await crawler.arun_many(urls=urls, config=batch_config)
             
-            # Update pages crawled counter - count only successful crawls
-            successful_results = [r for r in batch_results if r.success]
-            self._pages_crawled += len(successful_results)
-            
-            for result in batch_results:
-                url = result.url
-                depth = depths.get(url, 0)
+            # Group results by URL to handle duplicates; then map them back to parents in order
+            url_to_results: Dict[str, deque] = defaultdict(deque)
+            for r in batch_results:
+                url_to_results[r.url].append(r)
+
+            processed_results: List[CrawlResult] = []
+            for url, parent_url in current_level:
+                if not url_to_results[url]:
+                    # No corresponding result (e.g., failed scheduling); skip
+                    continue
+                result = url_to_results[url].popleft()
+                depth = depths.get((url, parent_url), 0)
                 result.metadata = result.metadata or {}
                 result.metadata["depth"] = depth
-                parent_url = next((parent for (u, parent) in current_level if u == url), None)
                 result.metadata["parent_url"] = parent_url
+                processed_results.append(result)
                 results.append(result)
-                
+
                 # Only discover links from successful crawls
                 if result.success:
                     # Link discovery will handle the max pages limit internally
                     await self.link_discovery(result, url, depth, visited, next_level, depths)
+
+            # Update pages crawled counter - count only successful crawls we processed
+            successful_results = [r for r in processed_results if r.success]
+            self._pages_crawled += len(successful_results)
 
             current_level = next_level
 
@@ -201,14 +211,20 @@ class BFSDeepCrawlStrategy(DeepCrawlStrategy):
         Streaming mode:
         Processes one BFS level at a time and yields results immediately as they arrive.
         """
-        visited: Set[str] = set()
+        visited: Set[Tuple[str, Optional[str]]] = set()
         current_level: List[Tuple[str, Optional[str]]] = [(start_url, None)]
-        depths: Dict[str, int] = {start_url: 0}
+        depths: Dict[Tuple[str, Optional[str]], int] = {(start_url, None): 0}
 
         while current_level and not self._cancel_event.is_set():
             next_level: List[Tuple[str, Optional[str]]] = []
             urls = [url for url, _ in current_level]
-            visited.update(urls)
+            # Track visited pairs for the current level
+            visited.update(current_level)
+
+            # Prepare a queue of parent assignments per URL to handle duplicates
+            parent_queues: Dict[str, deque] = defaultdict(deque)
+            for u, p in current_level:
+                parent_queues[u].append(p)
 
             stream_config = config.clone(deep_crawl_strategy=None, stream=True)
             stream_gen = await crawler.arun_many(urls=urls, config=stream_config)
@@ -217,10 +233,11 @@ class BFSDeepCrawlStrategy(DeepCrawlStrategy):
             results_count = 0
             async for result in stream_gen:
                 url = result.url
-                depth = depths.get(url, 0)
+                # Assign the correct parent for this occurrence
+                parent_url = parent_queues[url].popleft() if parent_queues[url] else None
+                depth = depths.get((url, parent_url), 0)
                 result.metadata = result.metadata or {}
                 result.metadata["depth"] = depth
-                parent_url = next((parent for (u, parent) in current_level if u == url), None)
                 result.metadata["parent_url"] = parent_url
                 
                 # Count only successful crawls

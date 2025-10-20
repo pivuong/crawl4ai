@@ -22,17 +22,17 @@ class DFSDeepCrawlStrategy(BFSDeepCrawlStrategy):
         Batch (non-streaming) DFS mode.
         Uses a stack to traverse URLs in DFS order, aggregating CrawlResults into a list.
         """
-        visited: Set[str] = set()
+        visited: Set[Tuple[str, Optional[str]]] = set()
         # Stack items: (url, parent_url, depth)
         stack: List[Tuple[str, Optional[str], int]] = [(start_url, None, 0)]
-        depths: Dict[str, int] = {start_url: 0}
+        depths: Dict[Tuple[str, Optional[str]], int] = {(start_url, None): 0}
         results: List[CrawlResult] = []
 
         while stack and not self._cancel_event.is_set():
             url, parent, depth = stack.pop()
-            if url in visited or depth > self.max_depth:
+            if (url, parent) in visited or depth > self.max_depth:
                 continue
-            visited.add(url)
+            visited.add((url, parent))
 
             # Clone config to disable recursive deep crawling.
             batch_config = config.clone(deep_crawl_strategy=None, stream=False)
@@ -60,7 +60,7 @@ class DFSDeepCrawlStrategy(BFSDeepCrawlStrategy):
                     
                     # Push new links in reverse order so the first discovered is processed next.
                     for new_url, new_parent in reversed(new_links):
-                        new_depth = depths.get(new_url, depth + 1)
+                        new_depth = depths.get((new_url, new_parent), depth + 1)
                         stack.append((new_url, new_parent, new_depth))
         return results
 
@@ -74,15 +74,15 @@ class DFSDeepCrawlStrategy(BFSDeepCrawlStrategy):
         Streaming DFS mode.
         Uses a stack to traverse URLs in DFS order and yields CrawlResults as they become available.
         """
-        visited: Set[str] = set()
+        visited: Set[Tuple[str, Optional[str]]] = set()
         stack: List[Tuple[str, Optional[str], int]] = [(start_url, None, 0)]
-        depths: Dict[str, int] = {start_url: 0}
+        depths: Dict[Tuple[str, Optional[str]], int] = {(start_url, None): 0}
 
         while stack and not self._cancel_event.is_set():
             url, parent, depth = stack.pop()
-            if url in visited or depth > self.max_depth:
+            if (url, parent) in visited or depth > self.max_depth:
                 continue
-            visited.add(url)
+            visited.add((url, parent))
 
             stream_config = config.clone(deep_crawl_strategy=None, stream=True)
             stream_gen = await crawler.arun_many(urls=[url], config=stream_config)
@@ -106,5 +106,5 @@ class DFSDeepCrawlStrategy(BFSDeepCrawlStrategy):
                     new_links: List[Tuple[str, Optional[str]]] = []
                     await self.link_discovery(result, url, depth, visited, new_links, depths)
                     for new_url, new_parent in reversed(new_links):
-                        new_depth = depths.get(new_url, depth + 1)
+                        new_depth = depths.get((new_url, new_parent), depth + 1)
                         stack.append((new_url, new_parent, new_depth))
